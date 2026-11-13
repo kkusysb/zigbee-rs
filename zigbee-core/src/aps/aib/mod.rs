@@ -6,7 +6,7 @@ use zigbee_types::StorageVec;
 
 use super::binding::Binding;
 
-pub(crate) const MAX_APS_BINDING_TABLE: usize = 4;
+pub(crate) const MAX_APS_BINDING_TABLE: usize = 8;
 const MAX_APS_CHANNEL_MASK_LIST: usize = 2; // TODO
 const MAX_APS_GROUP_TABLE: usize = 2; // TODO
 const MAX_APS_MAX_WINDOW_SIZE: usize = 2; // TODO

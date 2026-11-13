@@ -13,3 +13,6 @@ pub mod power_configuration;
 pub mod identify;
 // 3.14
 pub mod analog_input;
+// 3.14
+pub mod binary_input;
+pub mod binary_output;
