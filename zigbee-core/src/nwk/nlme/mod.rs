@@ -108,6 +108,7 @@ const PARENT_TIMEOUT_INACTIVE: u32 = 0;
 const MAX_PARENT_TRANSMIT_FAILURES: u8 = 3;
 
 #[derive(Debug, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum NetworkError {
     #[error("mac error: {0}")]
     MacError(#[from] MacError),
@@ -170,6 +171,7 @@ pub struct Nlme<M> {
 
 /// Keepalive method negotiated with the router parent (3.6.10.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum KeepaliveMethod {
     /// The parent tracks a MAC data poll as a keepalive
     /// (`nwkParentInformation` bit 0).
@@ -362,6 +364,19 @@ where
     /// response means a legacy parent and leaves the NIB untouched.
     pub async fn send_end_device_timeout_request(&self) -> Result<(), NetworkError> {
         let requested_timeout = self.nib().end_device_timeout_default();
+
+        let parent = self.parent_short_address()?;
+        defmt_or_log::debug!(
+            "[NWK] timeout request: parent=0x{:04x}, requested_timeout_enum={}",
+            parent.0,
+            requested_timeout
+        );
+
+        // The IEEE address is optional until learned from received traffic.
+        if let Some(ieee) = self.neighbor_ieee_address(parent) {
+            defmt_or_log::debug!("[NWK] parent IEEE address: 0x{:016x}", ieee.0);
+        }
+
         let command = Command::EndDeviceTimeoutRequest(EndDeviceTimeoutRequest {
             requested_timeout,
             // all bits reserved, must be 0 (3.4.11.3.2)
@@ -369,8 +384,7 @@ where
         });
 
         let mut buf = [0u8; 256];
-        let len =
-            self.build_nwk_command_frame(self.parent_short_address()?, command, true, &mut buf)?;
+        let len = self.build_nwk_command_frame(parent, command, true, &mut buf)?;
         self.pending_timeout_request
             .store(requested_timeout, Ordering::Relaxed);
         self.mac
@@ -427,14 +441,14 @@ where
                 Ok(true)
             }
             Some(response) => {
-                log::warn!(
+                defmt_or_log::warn!(
                     "[NWK] end-device timeout rejected (status={:#04x})",
                     response.status
                 );
                 Ok(false)
             }
             None => {
-                log::warn!("[NWK] no end-device timeout response, assuming legacy parent");
+                defmt_or_log::warn!("[NWK] no end-device timeout response, assuming legacy parent");
                 Ok(false)
             }
         }
@@ -498,7 +512,7 @@ where
         // concurrently running receive loop
         self.timeout_response.reset();
         if let Err(e) = self.send_end_device_timeout_request().await {
-            log::warn!("[NWK] keepalive transmission failed ({e:?})");
+            defmt_or_log::warn!("[NWK] keepalive transmission failed ({:?})", e);
             return Err(self.parent_link_failure());
         }
 
@@ -516,11 +530,11 @@ where
                 Ok(())
             }
             Some(response) => {
-                log::warn!("[NWK] keepalive rejected (status={:#04x})", response.status);
+                defmt_or_log::warn!("[NWK] keepalive rejected (status={:#04x})", response.status);
                 Err(self.parent_link_failure())
             }
             None => {
-                log::warn!("[NWK] no keepalive response from parent");
+                defmt_or_log::warn!("[NWK] no keepalive response from parent");
                 Err(self.parent_link_failure())
             }
         }
@@ -531,18 +545,28 @@ where
     // response by polling for it
     async fn poll_until_timeout_response(&self, retries: u8) {
         let mut buf = [0u8; 128];
-        for _ in 0..retries {
+        for attempt in 0..retries {
             if self.timeout_response.is_signaled() {
                 return;
             }
+
+            defmt_or_log::debug!("[NWK] timeout-response poll {}/{}", attempt + 1, retries);
+
             match self.poll_parent(&mut buf).await {
-                Ok(Some(len)) => match self.process_received_nwk_frame(&mut buf[..len]).await {
-                    Ok(Some(_)) => log::debug!("[NWK] keepalive poll dropped a data frame"),
-                    Ok(None) => (),
-                    Err(e) => log::debug!("[NWK] keepalive frame not processed: {e:?}"),
-                },
-                Ok(None) => (),
-                Err(e) => log::debug!("[NWK] keepalive poll failed: {e:?}"),
+                Ok(Some(len)) => {
+                    defmt_or_log::debug!("[NWK] timeout-response poll: received {} bytes", len);
+                    match self.process_received_nwk_frame(&mut buf[..len]).await {
+                        Ok(Some(_)) => {
+                            defmt_or_log::debug!("[NWK] keepalive poll dropped a data frame");
+                        }
+                        Ok(None) => (),
+                        Err(e) => {
+                            defmt_or_log::debug!("[NWK] keepalive frame not processed: {:?}", e);
+                        }
+                    }
+                }
+                Ok(None) => defmt_or_log::debug!("[NWK] timeout-response poll: no queued frame"),
+                Err(e) => defmt_or_log::debug!("[NWK] keepalive poll failed: {:?}", e),
             }
         }
     }
@@ -575,7 +599,7 @@ where
         if remaining != PARENT_TIMEOUT_INACTIVE {
             return false;
         }
-        log::warn!("[NWK] end-device timeout elapsed, assuming aged out by parent");
+        defmt_or_log::warn!("[NWK] end-device timeout elapsed, assuming aged out by parent");
         self.parent_link_failure();
         true
     }
@@ -598,7 +622,11 @@ where
         };
 
         let failures = self.record_transmit_failure(parent);
-        log::debug!("[NWK] transmission via parent failed ({e:?}), failures={failures}");
+        defmt_or_log::debug!(
+            "[NWK] transmission via parent failed ({:?}), failures={}",
+            e,
+            failures
+        );
         if failures < MAX_PARENT_TRANSMIT_FAILURES {
             return Err(e.into());
         }
@@ -683,7 +711,7 @@ where
         require_permit_joining: bool,
     ) -> heapless::Vec<usize, 16> {
         let table = self.nib().neighbor_table();
-        log::debug!("[NWK-JOIN] neighbor table: {table:#?}");
+        defmt_or_log::debug!("[NWK-JOIN] neighbor table: {:?}", &*table);
         let stack_profile = self.nib().stack_profile();
         let permits = |n: &NwkNeighbor| !require_permit_joining || n.permit_joining;
         // BDB 8.2: a steering device may name the wildcard extended PAN id
@@ -740,9 +768,11 @@ where
         // extended PAN id is by far the most common cause
         if candidates.is_empty() {
             if table.is_empty() {
-                log::warn!("[NWK-JOIN] no suitable parent: the scan found no networks at all");
+                defmt_or_log::warn!(
+                    "[NWK-JOIN] no suitable parent: the scan found no networks at all"
+                );
             } else {
-                log::warn!(
+                defmt_or_log::warn!(
                     "[NWK-JOIN] no suitable parent for EPID {:#018x} (joining as {}); the scan saw {} network(s):",
                     extended_pan_id.0,
                     if join_as_router {
@@ -753,7 +783,7 @@ where
                     table.len()
                 );
                 for n in table.iter() {
-                    log::warn!(
+                    defmt_or_log::warn!(
                         "[NWK-JOIN]   EPID {:#018x} ch {} permit_joining={} router_capacity={} end_device_capacity={} lqi={} link_cost={} potential_parent={} update_id={}",
                         n.extended_pan_id.0,
                         n.logical_channel,
@@ -942,20 +972,20 @@ where
         match command {
             // routing (3.4.1-3.4.2): a sleepy end device routes via its parent,
             // so route discovery is currently a no-op
-            Command::RouteRequest(_) => log::trace!("[NWK] route request (ignored)"),
-            Command::RouteReply(_) => log::trace!("[NWK] route reply (ignored)"),
-            Command::RouteRecord(_) => log::trace!("[NWK] route record (ignored)"),
+            Command::RouteRequest(_) => defmt_or_log::trace!("[NWK] route request (ignored)"),
+            Command::RouteReply(_) => defmt_or_log::trace!("[NWK] route reply (ignored)"),
+            Command::RouteRecord(_) => defmt_or_log::trace!("[NWK] route record (ignored)"),
             // network maintenance (3.4.3, 3.4.9, 3.4.10)
-            Command::NetworkStatus(_) => log::trace!("[NWK] network status (ignored)"),
-            Command::NetworkReport(_) => log::trace!("[NWK] network report (ignored)"),
-            Command::NetworkUpdate(_) => log::trace!("[NWK] network update (ignored)"),
+            Command::NetworkStatus(_) => defmt_or_log::trace!("[NWK] network status (ignored)"),
+            Command::NetworkReport(_) => defmt_or_log::trace!("[NWK] network report (ignored)"),
+            Command::NetworkUpdate(_) => defmt_or_log::trace!("[NWK] network update (ignored)"),
             Command::Leave(leave) => self.handle_leave_command(header, &leave).await,
             // rejoin (3.4.6–3.4.7): a request is parent-side only; a response
             // is handed to the rejoin procedure waiting for it, which may be
             // driven by another task than this receive path
-            Command::RejoinRequest(_) => log::trace!("[NWK] rejoin request (ignored)"),
+            Command::RejoinRequest(_) => defmt_or_log::trace!("[NWK] rejoin request (ignored)"),
             Command::RejoinResponse(response) => {
-                log::debug!(
+                defmt_or_log::debug!(
                     "[NWK] rejoin response: address={:?}, status={:#04x}",
                     response.network_address,
                     response.status
@@ -969,11 +999,11 @@ where
                 self.rejoin_response.signal(response);
             }
             // link management (3.4.8, 3.4.13)
-            Command::LinkStatus(_) => log::trace!("[NWK] link status (ignored)"),
-            Command::LinkPowerDelta(_) => log::trace!("[NWK] link power delta (ignored)"),
+            Command::LinkStatus(_) => defmt_or_log::trace!("[NWK] link status (ignored)"),
+            Command::LinkPowerDelta(_) => defmt_or_log::trace!("[NWK] link power delta (ignored)"),
             // end-device timeout requests are parent-side only (3.4.11)
             Command::EndDeviceTimeoutRequest(_) => {
-                log::trace!("[NWK] end-device timeout request (ignored)");
+                defmt_or_log::trace!("[NWK] end-device timeout request (ignored)");
             }
             // 3.6.10.2: on success store the parent information bitmask and
             // the negotiated timeout, otherwise the parent keeps its default
@@ -990,12 +1020,13 @@ where
                     // the parent restarted its timeout counter for this device
                     // (3.6.10.5), so the local one follows (3.6.10.6)
                     self.refresh_parent_timeout();
-                    log::info!(
-                        "[NWK] end-device timeout negotiated: enum={pending}, parent_information={:#04x}",
+                    defmt_or_log::info!(
+                        "[NWK] end-device timeout negotiated: enum={}, parent_information={:#04x}",
+                        pending,
                         response.parent_information
                     );
                 } else {
-                    log::warn!(
+                    defmt_or_log::warn!(
                         "[NWK] end-device timeout response rejected or unexpected (status={:#04x})",
                         response.status
                     );
@@ -1003,7 +1034,9 @@ where
                 // hand it to a keepalive waiting for it (3.6.10.3)
                 self.timeout_response.signal(response);
             }
-            Command::Reserved(id) => log::trace!("[NWK] reserved command {id:#04x} (ignored)"),
+            Command::Reserved(id) => {
+                defmt_or_log::trace!("[NWK] reserved command {:#04x} (ignored)", id);
+            }
         }
     }
 
@@ -1028,13 +1061,13 @@ where
                 // our parent has dropped us: we are no longer on the network,
                 // and the indication carries a NULL device address (3.6.1.10.3)
                 self.nib().update_extended_panid(|value| *value = 0);
-                log::info!("[NWK] removed by parent (leave notification)");
+                defmt_or_log::info!("[NWK] removed by parent (leave notification)");
                 self.leave_indication.signal(NlmeLeaveIndication {
                     device_address: None,
                     rejoin: options.rejoin(),
                 });
             } else {
-                log::debug!(
+                defmt_or_log::debug!(
                     "[NWK] neighbor {:?} left the network (rejoin={})",
                     header.source_ieee,
                     options.rejoin()
@@ -1061,7 +1094,7 @@ where
             .leave_network(options.remove_children(), options.rejoin())
             .await
         {
-            log::warn!("[NWK] failed to announce leave: {e:?}");
+            defmt_or_log::warn!("[NWK] failed to announce leave: {:?}", e);
         }
 
         // 3.2.2.19: removed by another device, so the indication carries a NULL
@@ -1087,7 +1120,9 @@ where
         if self.nib().network_address() == NWK_COORDINATOR_ADDRESS
             || destination.0 >= NWK_BROADCAST_ADDRESS_MIN
         {
-            log::trace!("[NWK] leave request dropped (coordinator or broadcast destination)");
+            defmt_or_log::trace!(
+                "[NWK] leave request dropped (coordinator or broadcast destination)"
+            );
             return false;
         }
 
@@ -1096,14 +1131,16 @@ where
         if self.nib().capability_information().device_type() {
             let allowed = self.nib().leave_request_allowed();
             if !allowed {
-                log::trace!("[NWK] leave request refused (nwkLeaveRequestAllowed is FALSE)");
+                defmt_or_log::trace!(
+                    "[NWK] leave request refused (nwkLeaveRequestAllowed is FALSE)"
+                );
             }
             return allowed;
         }
 
         // step 3: an end device is only removed by its parent
         if !from_parent {
-            log::trace!("[NWK] leave request refused (sender is not our parent)");
+            defmt_or_log::trace!("[NWK] leave request refused (sender is not our parent)");
         }
         from_parent
     }
@@ -1215,7 +1252,7 @@ where
             // network is still there for a later NLME-JOIN.request with
             // `RejoinNetwork::NwkRejoin`; driving that is the higher layer's
             // call, which the NLME-LEAVE.indication/confirm hands it
-            log::info!("[NWK] left the network, rejoin requested");
+            defmt_or_log::info!("[NWK] left the network, rejoin requested");
             return;
         }
 
@@ -1384,7 +1421,7 @@ where
             return fail(NlmeJoinStatus::NotPermitted);
         }
 
-        log::debug!("[NWK-JOIN] neighbor candidates: {candidates:?}");
+        defmt_or_log::debug!("[NWK-JOIN] neighbor candidates: {:?}", candidates);
 
         // build MAC CapabilityInformation from NWK CapabilityInformation
         // bitmap (Table 3-62)
@@ -1551,7 +1588,7 @@ where
                 // the channel is whatever the radio is already tuned to
                 Ok(response) => return self.rejoin_confirm(response, &request, 0).await,
                 Err(status) => {
-                    log::debug!("[NWK-REJOIN] remembered parent failed ({status:?})");
+                    defmt_or_log::debug!("[NWK-REJOIN] remembered parent failed ({:?})", status);
                     last_status = status;
                 }
             }
@@ -1561,7 +1598,7 @@ where
             return fail(last_status);
         }
 
-        log::debug!(
+        defmt_or_log::debug!(
             "[NWK-REJOIN] scanning {:?} for another parent",
             request.scan_channels
         );
@@ -1569,14 +1606,14 @@ where
             .network_discovery(request.scan_channels.clone(), request.scan_duration)
             .await
         {
-            log::warn!("[NWK-REJOIN] scan failed: {e:?}");
+            defmt_or_log::warn!("[NWK-REJOIN] scan failed: {:?}", e);
             return fail(NlmeJoinStatus::MacError);
         }
 
         let join_as_router = request.capability_information.device_type();
         let candidates = self.select_rejoin_candidates(request.extended_pan_id, join_as_router);
         if candidates.is_empty() {
-            log::warn!("[NWK-REJOIN] no parent candidate found");
+            defmt_or_log::warn!("[NWK-REJOIN] no parent candidate found");
             return fail(NlmeJoinStatus::NotPermitted);
         }
 
@@ -1587,7 +1624,11 @@ where
             match self.rejoin_via_parent(parent, &request).await {
                 Ok(response) => return self.rejoin_confirm(response, &request, channel).await,
                 Err(status) => {
-                    log::debug!("[NWK-REJOIN] candidate {parent:?} failed ({status:?})");
+                    defmt_or_log::debug!(
+                        "[NWK-REJOIN] candidate {:?} failed ({:?})",
+                        parent,
+                        status
+                    );
                     last_status = status;
                 }
             }
@@ -1741,12 +1782,14 @@ where
             }
             match self.poll_parent(&mut buf).await {
                 Ok(Some(len)) => match self.process_received_nwk_frame(&mut buf[..len]).await {
-                    Ok(Some(_)) => log::debug!("[NWK-REJOIN] polled data frame dropped"),
+                    Ok(Some(_)) => defmt_or_log::debug!("[NWK-REJOIN] polled data frame dropped"),
                     Ok(None) => (),
-                    Err(e) => log::debug!("[NWK-REJOIN] polled frame not processed: {e:?}"),
+                    Err(e) => {
+                        defmt_or_log::debug!("[NWK-REJOIN] polled frame not processed: {:?}", e);
+                    }
                 },
                 Ok(None) => (),
-                Err(e) => log::debug!("[NWK-REJOIN] poll failed: {e:?}"),
+                Err(e) => defmt_or_log::debug!("[NWK-REJOIN] poll failed: {:?}", e),
             }
         }
     }
@@ -1773,7 +1816,7 @@ where
                 // later poll
                 Ok(None) => (),
                 Err(e @ (NetworkError::SecurityError(_) | NetworkError::ParseError)) => {
-                    log::debug!("[NWK-POLL] dropped rx frame: {e:?}");
+                    defmt_or_log::debug!("[NWK-POLL] dropped rx frame: {:?}", e);
                 }
                 Err(e) => return Err(e),
             }

@@ -198,8 +198,8 @@ macro_rules! construct_ib {
             unsafe { IB.as_ref().expect(concat!(stringify!($ib_name), " not initialized")) }
         }
 
-        static DIRTY_SIGNAL: ::zigbee_types::sync::Event =
-            ::zigbee_types::sync::Event::new();
+        static DIRTY_SIGNAL: ::zigbee_types::sync::SingleWaiterEvent =
+            ::zigbee_types::sync::SingleWaiterEvent::new();
 
         /// Waits until a persisted attribute changes (single waiter).
         ///
@@ -248,6 +248,7 @@ macro_rules! construct_ib {
         #[repr(u8)]
         #[allow(non_camel_case_types)]
         #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+        #[cfg_attr(feature = "defmt", derive(::defmt::Format))]
         $ib_vis enum $ib_id {
             $($($field = $skey,)?)+
         }

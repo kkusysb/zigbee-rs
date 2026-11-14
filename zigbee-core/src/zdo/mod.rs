@@ -11,8 +11,9 @@ pub mod config;
 pub mod descriptor;
 pub mod device_annce;
 use zigbee_types::StorageVec;
-use zigbee_types::sync::Event;
+use zigbee_types::sync::MultiWaiterEvent;
 use zigbee_types::sync::Signal;
+use zigbee_types::sync::SingleWaiterEvent;
 
 use crate::apl::descriptors::node_descriptor::LogicalType;
 use crate::aps::aib;
@@ -49,6 +50,8 @@ use crate::security::SecurityContext;
 // network key (4.4.10); wide enough to cover the router -> TC -> router
 // round-trip when the parent is not the coordinator
 const TRANSPORT_KEY_POLL_RETRIES: u8 = 20;
+// receive loop plus application tasks waiting to talk to the network
+const MAX_JOIN_WAITERS: usize = 4;
 
 /// Provides an interface between the application object, the device profile and
 /// the APS.
@@ -63,13 +66,14 @@ pub struct ZigbeeDevice<M> {
     apsme: Apsme,
     // ZDP transaction sequence number (2.4.2), independent of the APS counter
     zdp_seq: AtomicU8,
-    // signaled once the network key is installed; gates the receive loop
-    joined: Event,
+    // set once the network key is installed; gates the receive loop and
+    // application tasks
+    joined: MultiWaiterEvent<MAX_JOIN_WAITERS>,
     // carries an inbound Node_Desc_rsp (2.4.4.2.3) to the procedure that
     // asked for it, e.g. the BDB TC link key exchange
     node_desc_rsp: Signal<descriptor::NodeDescRsp>,
     // set when a leave asked this device to rejoin (3.6.1.10.4 step 1)
-    rejoin_requested: Event,
+    rejoin_requested: SingleWaiterEvent,
 }
 
 // Zigbee Device Profile identifier (endpoint 0)
@@ -84,6 +88,7 @@ const MAX_MATCHING_ENDPOINTS: usize = 16;
 /// One inbound application-profile request handed to a
 /// [`ClusterRequestHandler`].
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct ClusterRequest<'a> {
     pub profile_id: u16,
     pub cluster_id: u16,
@@ -101,6 +106,7 @@ pub struct ClusterRequest<'a> {
 /// a request (2.2.4.1.3), so the addressing belongs to whoever built the
 /// response rather than to the layer sending it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct ClusterReply {
     pub cluster_id: u16,
     pub profile_id: u16,
@@ -218,9 +224,9 @@ impl<M: Mlme> ZigbeeDevice<M> {
             nlme,
             apsme: Apsme::new(aps_counter_init),
             zdp_seq: AtomicU8::new(zdp_seq_init),
-            joined: Event::new(),
+            joined: MultiWaiterEvent::new(),
             node_desc_rsp: Signal::new(),
-            rejoin_requested: Event::new(),
+            rejoin_requested: SingleWaiterEvent::new(),
         }
     }
 
@@ -359,7 +365,7 @@ impl<M: Mlme> ZigbeeDevice<M> {
             Err(NetworkError::SecurityError(_)) => ApsdeSapConfirmStatus::SecurityFail,
             Err(NetworkError::NotJoined) => ApsdeSapConfirmStatus::NoShortAddress,
             Err(e) => {
-                log::debug!("[ZDO] tx failed: {e:?}");
+                defmt_or_log::debug!("[ZDO] tx failed: {:?}", e);
                 ApsdeSapConfirmStatus::NoAck
             }
         }
@@ -498,20 +504,20 @@ impl<M: Mlme> ZigbeeDevice<M> {
             scan_duration,
         };
 
-        log::debug!("[ZDO] secure rejoin, EPID={extended_pan_id:?}");
+        defmt_or_log::debug!("[ZDO] secure rejoin, EPID={:?}", extended_pan_id);
         let confirm = self.nlme.join(request(true)).await;
         if confirm.status == NlmeJoinStatus::Success {
             self.finish_rejoin().await?;
             return Ok(confirm);
         }
 
-        log::warn!(
+        defmt_or_log::warn!(
             "[ZDO] secure rejoin failed ({:?}), falling back to trust center rejoin",
             confirm.status
         );
         let confirm = self.nlme.join(request(false)).await;
         if confirm.status != NlmeJoinStatus::Success {
-            log::warn!("[ZDO] trust center rejoin failed ({:?})", confirm.status);
+            defmt_or_log::warn!("[ZDO] trust center rejoin failed ({:?})", confirm.status);
             return Ok(confirm);
         }
 
@@ -529,11 +535,17 @@ impl<M: Mlme> ZigbeeDevice<M> {
     async fn finish_rejoin(&self) -> Result<(), NetworkError> {
         self.mark_rejoined();
         // 3.6.10.2: renegotiated after every rejoin, even with the same parent
-        log::debug!("[ZDO] rejoined, negotiating end-device timeout");
-        let _ = self.nlme.negotiate_end_device_timeout().await;
-        log::debug!("[ZDO] announcing self");
+        defmt_or_log::debug!("[ZDO] rejoined, negotiating end-device timeout");
+        match self.nlme.negotiate_end_device_timeout().await {
+            Ok(true) => defmt_or_log::debug!("[ZDO] timeout negotiation succeeded"),
+            Ok(false) => defmt_or_log::debug!("[ZDO] timeout negotiation unsuccessful"),
+            Err(error) => {
+                defmt_or_log::warn!("[ZDO] timeout negotiation error: {:?}", error);
+            }
+        }
+        defmt_or_log::debug!("[ZDO] announcing self");
         let result = self.announce_self().await;
-        log::debug!("[ZDO] rejoin complete: {result:?}");
+        defmt_or_log::debug!("[ZDO] rejoin complete: {:?}", result);
         result
     }
 
@@ -566,7 +578,7 @@ impl<M: Mlme> ZigbeeDevice<M> {
 
         match transport_key {
             TransportKey::StandardNetworkKey(nwk_key) => {
-                log::debug!("[ZDO] received network key {:02x?}", nwk_key.key);
+                defmt_or_log::debug!("[ZDO] received network key {:?}", nwk_key.key);
 
                 let aib = aib::get_ref();
                 aib.update_trust_center_address(|value| *value = nwk_key.source_address);
@@ -631,8 +643,10 @@ impl<M: Mlme> ZigbeeDevice<M> {
     }
 
     /// Wait until the network key is installed and the device is joined.
+    ///
+    /// Any number of tasks may wait at the same time.
     pub async fn wait_until_joined(&self) {
-        self.joined.wait_set().await;
+        self.joined.wait().await;
     }
 
     // open or close the join gate, keeping the APS layer's view in sync
@@ -655,7 +669,7 @@ impl<M: Mlme> ZigbeeDevice<M> {
         if indication.device_address.is_some() {
             return;
         }
-        log::info!(
+        defmt_or_log::info!(
             "[ZDO] removed from the network (rejoin={})",
             indication.rejoin
         );
@@ -796,7 +810,7 @@ impl<M: Mlme> ZigbeeDevice<M> {
             // frame that was meant for us and failed to decrypt looks exactly
             // like never having received one.
             Err(e @ (NetworkError::ParseError | NetworkError::SecurityError(_))) => {
-                log::debug!("[ZDO] dropped undecodable frame on poll: {e:?}");
+                defmt_or_log::debug!("[ZDO] dropped undecodable frame on poll: {:?}", e);
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -818,7 +832,7 @@ impl<M: Mlme> ZigbeeDevice<M> {
             // ambient traffic we cannot decode — normal, not a fault, but
             // traced: see `poll_and_dispatch`
             Err(e @ (NetworkError::ParseError | NetworkError::SecurityError(_))) => {
-                log::debug!("[ZDO] dropped undecodable frame on receive: {e:?}");
+                defmt_or_log::debug!("[ZDO] dropped undecodable frame on receive: {:?}", e);
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -854,8 +868,13 @@ impl<M: Mlme> ZigbeeDevice<M> {
         let src_endpoint = indication.src_endpoint.value;
         let dst_endpoint = indication.dst_endpoint;
 
-        log::debug!(
-            "[ZDO] rx profile={profile:#06x} cluster={cluster:#06x} from {src:#06x} ep {src_endpoint}->{dst_endpoint}"
+        defmt_or_log::debug!(
+            "[ZDO] rx profile={:#06x} cluster={:#06x} from {:#06x} ep {}->{}",
+            profile,
+            cluster,
+            src,
+            src_endpoint,
+            dst_endpoint
         );
 
         // deferred until after the response below has actually gone out: the
@@ -901,10 +920,11 @@ impl<M: Mlme> ZigbeeDevice<M> {
         };
 
         if let Some(reply) = response {
-            log::debug!(
-                "[ZDO] tx response cluster={:#06x} ({} bytes) to {src:#06x}",
+            defmt_or_log::debug!(
+                "[ZDO] tx response cluster={:#06x} ({} bytes) to {:#06x}",
                 reply.cluster_id,
-                reply.len
+                reply.len,
+                src
             );
             self.apsme
                 .unicast_data(
@@ -918,12 +938,12 @@ impl<M: Mlme> ZigbeeDevice<M> {
                 )
                 .await?;
         } else {
-            log::trace!("[ZDO] no response for cluster {cluster:#06x}");
+            defmt_or_log::trace!("[ZDO] no response for cluster {:#06x}", cluster);
         }
 
         if let Some(request) = leave_after_reply {
             let confirm = self.nlme.leave(request).await;
-            log::info!(
+            defmt_or_log::info!(
                 "[ZDO] leaving network after Mgmt_Leave_req: {:?}",
                 confirm.status
             );
