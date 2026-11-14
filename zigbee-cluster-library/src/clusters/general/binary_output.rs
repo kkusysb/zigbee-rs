@@ -5,8 +5,8 @@
 //! Reports and controls the state of a binary (on/off) output.
 
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU8;
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::Ordering;
 
 use zigbee_core::zdo::ClusterReply;
@@ -39,8 +39,7 @@ pub const PRESENT_VALUE: Attribute<Bool, ReadWrite, Reportable> =
     CLUSTER.attribute(AttributeId(0x0055), "PresentValue");
 
 /// `Description` (`String`).
-pub const DESCRIPTION: Attribute<ShortText> =
-    CLUSTER.attribute(AttributeId(0x001c), "Description");
+pub const DESCRIPTION: Attribute<ShortText> = CLUSTER.attribute(AttributeId(0x001c), "Description");
 
 const ATTRIBUTES: &[AttrInfo] = &[DESCRIPTION.attr_info(), PRESENT_VALUE.attr_info()];
 
@@ -52,6 +51,19 @@ pub struct BinaryOutputServer<'a> {
     handles: AtomicU32,
     last_status: AtomicU8,
     reporting: Option<&'a dyn AttributeReporting>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for BinaryOutputServer<'_> {
+    fn format(&self, f: defmt::Formatter<'_>) {
+        defmt::write!(
+            f,
+            "BinaryOutputServer {{ present_value: {}, writes: {}, handles: {} }}",
+            self.present_value(),
+            self.write_count(),
+            self.handle_count()
+        );
+    }
 }
 
 impl<'a> BinaryOutputServer<'a> {
@@ -110,9 +122,7 @@ impl ClusterServer for BinaryOutputServer<'_> {
                 };
                 DESCRIPTION.encode(text, out, offset)
             }
-            attribute::PRESENT_VALUE => {
-                PRESENT_VALUE.encode(self.present_value(), out, offset)
-            }
+            attribute::PRESENT_VALUE => PRESENT_VALUE.encode(self.present_value(), out, offset),
             _ => return Status::UnsupportedAttribute,
         };
 
@@ -135,13 +145,13 @@ impl ClusterServer for BinaryOutputServer<'_> {
             return status;
         }
         self.writes.fetch_add(1, Ordering::Relaxed);
-        let status = match PRESENT_VALUE.decode(type_id, bytes, offset) {
-            Ok(value) => {
-                self.set_present_value(value);
-                Status::Success
-            }
-            Err(_) => Status::InvalidDataType,
-        };
+        let status =
+            PRESENT_VALUE
+                .decode(type_id, bytes, offset)
+                .map_or(Status::InvalidDataType, |value| {
+                    self.set_present_value(value);
+                    Status::Success
+                });
         self.last_status.store(status as u8, Ordering::Relaxed);
         status
     }

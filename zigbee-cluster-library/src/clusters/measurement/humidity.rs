@@ -38,8 +38,10 @@ use crate::types::ids::ClusterId;
 use crate::types::integers::Uint16;
 
 /// Cluster descriptor (ZCL 4.7).
-pub const CLUSTER: Cluster =
-    Cluster::new(ClusterId(super::water_content::RELATIVE_HUMIDITY_CLUSTER_ID), "RelativeHumidity");
+pub const CLUSTER: Cluster = Cluster::new(
+    ClusterId(super::water_content::RELATIVE_HUMIDITY_CLUSTER_ID),
+    "RelativeHumidity",
+);
 
 /// `MeasuredValue` (`Uint16`, hundredths of a percent), mandatory and reportable.
 pub const MEASURED_VALUE: Attribute<Uint16, ReadOnly, Reportable> =
@@ -54,8 +56,7 @@ pub const MAX_MEASURED_VALUE: Attribute<Uint16> =
     CLUSTER.attribute(AttributeId(0x0002), "MaxMeasuredValue");
 
 /// `Tolerance` (`Uint16`).
-pub const TOLERANCE: Attribute<Uint16> =
-    CLUSTER.attribute(AttributeId(0x0003), "Tolerance");
+pub const TOLERANCE: Attribute<Uint16> = CLUSTER.attribute(AttributeId(0x0003), "Tolerance");
 
 const ATTRIBUTES: &[AttrInfo] = &[
     MEASURED_VALUE.attr_info(),
@@ -71,6 +72,17 @@ pub struct RelativeHumidityServer<'a> {
     max_measured_value: u16,
     tolerance: Option<u16>,
     reporting: Option<&'a dyn AttributeReporting>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for RelativeHumidityServer<'_> {
+    fn format(&self, f: defmt::Formatter<'_>) {
+        defmt::write!(
+            f,
+            "RelativeHumidityServer {{ measured_value: {} }}",
+            self.measured_value()
+        );
+    }
 }
 
 impl<'a> RelativeHumidityServer<'a> {

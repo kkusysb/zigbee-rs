@@ -36,8 +36,7 @@ pub const PRESENT_VALUE: Attribute<Bool, ReadOnly, Reportable> =
     CLUSTER.attribute(AttributeId(0x0055), "PresentValue");
 
 /// `Description` (`String`).
-pub const DESCRIPTION: Attribute<ShortText> =
-    CLUSTER.attribute(AttributeId(0x001c), "Description");
+pub const DESCRIPTION: Attribute<ShortText> = CLUSTER.attribute(AttributeId(0x001c), "Description");
 
 const ATTRIBUTES: &[AttrInfo] = &[DESCRIPTION.attr_info(), PRESENT_VALUE.attr_info()];
 
@@ -46,6 +45,17 @@ pub struct BinaryInputServer<'a> {
     present_value: AtomicBool,
     description: &'static str,
     reporting: Option<&'a dyn AttributeReporting>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for BinaryInputServer<'_> {
+    fn format(&self, f: defmt::Formatter<'_>) {
+        defmt::write!(
+            f,
+            "BinaryInputServer {{ present_value: {} }}",
+            self.present_value()
+        );
+    }
 }
 
 impl<'a> BinaryInputServer<'a> {
@@ -89,9 +99,7 @@ impl ClusterServer for BinaryInputServer<'_> {
                 };
                 DESCRIPTION.encode(text, out, offset)
             }
-            attribute::PRESENT_VALUE => {
-                PRESENT_VALUE.encode(self.present_value(), out, offset)
-            }
+            attribute::PRESENT_VALUE => PRESENT_VALUE.encode(self.present_value(), out, offset),
             _ => return Status::UnsupportedAttribute,
         };
 
