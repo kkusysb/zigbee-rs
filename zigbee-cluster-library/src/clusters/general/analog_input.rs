@@ -28,10 +28,12 @@ use crate::types::ZclBitmap8;
 use crate::types::descriptors::AttrInfo;
 use crate::types::descriptors::Attribute;
 use crate::types::descriptors::Cluster;
+use crate::types::descriptors::NotReportable;
 use crate::types::descriptors::ReadOnly;
 use crate::types::descriptors::Reportable;
 use crate::types::ids::AttributeId;
 use crate::types::ids::ClusterId;
+use crate::types::integers::Uint32;
 
 /// Cluster identifier (ZCL 3.14.2).
 pub const CLUSTER_ID: u16 = 0x000c;
@@ -147,11 +149,30 @@ pub const PRESENT_VALUE: Attribute<Single, ReadOnly, Reportable> =
 pub const STATUS_FLAGS: Attribute<Bitmap8<StatusFlags>, ReadOnly, Reportable> =
     CLUSTER.attribute(AttributeId(0x006f), "StatusFlags");
 
+/// `Resolution` (`Single`), optional: the smallest change the input can
+/// detect. Home Assistant uses it to pick the display precision.
+pub const RESOLUTION: Attribute<Single, ReadOnly, NotReportable> =
+    CLUSTER.attribute(AttributeId(0x006a), "Resolution");
+
+/// `ApplicationType` (`Uint32`), optional: what the reading is. Bits 0-15 are
+/// the application index, bits 16-23 the `AnalogInputType` (ZCL 3.14.11.6) and
+/// bits 24-31 the application group. Home Assistant derives the unit and
+/// device class from it — for a plain counter, `AnalogInputType::Count`
+/// (0x0c) in the type byte: `0x000c_0000`.
+pub const APPLICATION_TYPE: Attribute<Uint32, ReadOnly, NotReportable> =
+    CLUSTER.attribute(AttributeId(0x0100), "ApplicationType");
+
+/// `AnalogInputType::Count` (ZCL 3.14.11.6), the type byte of an
+/// [`APPLICATION_TYPE`] value for a plain counter reading.
+pub const APPLICATION_TYPE_COUNT: u32 = 0x000c_0000;
+
 const ATTRIBUTES: &[AttrInfo] = &[
     DESCRIPTION.attr_info(),
     OUT_OF_SERVICE.attr_info(),
     PRESENT_VALUE.attr_info(),
     STATUS_FLAGS.attr_info(),
+    RESOLUTION.attr_info(),
+    APPLICATION_TYPE.attr_info(),
 ];
 
 /// Analog Input cluster server.
@@ -162,6 +183,8 @@ pub struct AnalogInputServer<'a> {
     present_value: AtomicU32,
     out_of_service: AtomicBool,
     status_flags: AtomicU8,
+    resolution: AtomicU32,
+    application_type: AtomicU32,
     description: &'static str,
     reporting: Option<&'a dyn AttributeReporting>,
 }
@@ -183,6 +206,8 @@ impl<'a> AnalogInputServer<'a> {
             present_value: AtomicU32::new(initial.to_bits()),
             out_of_service: AtomicBool::new(false),
             status_flags: AtomicU8::new(0),
+            resolution: AtomicU32::new(1.0f32.to_bits()),
+            application_type: AtomicU32::new(0),
             description: "Analog input",
             reporting: None,
         }
@@ -191,6 +216,18 @@ impl<'a> AnalogInputServer<'a> {
     #[must_use]
     pub const fn with_description(mut self, description: &'static str) -> Self {
         self.description = description;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_resolution(mut self, resolution: f32) -> Self {
+        self.resolution = AtomicU32::new(resolution.to_bits());
+        self
+    }
+
+    #[must_use]
+    pub const fn with_application_type(mut self, application_type: u32) -> Self {
+        self.application_type = AtomicU32::new(application_type);
         self
     }
 
@@ -223,6 +260,16 @@ impl<'a> AnalogInputServer<'a> {
     pub fn set_status_flags(&self, value: StatusFlags) {
         self.status_flags.store(value.raw(), Ordering::Relaxed);
     }
+
+    /// The smallest change the input can detect; 1.0 unless overridden.
+    pub fn resolution(&self) -> f32 {
+        f32::from_bits(self.resolution.load(Ordering::Relaxed))
+    }
+
+    /// What the reading is, encoded per [`APPLICATION_TYPE`].
+    pub fn application_type(&self) -> u32 {
+        self.application_type.load(Ordering::Relaxed)
+    }
 }
 
 impl ClusterServer for AnalogInputServer<'_> {
@@ -247,6 +294,10 @@ impl ClusterServer for AnalogInputServer<'_> {
                 PRESENT_VALUE.encode(Single(self.present_value()), out, offset)
             }
             attribute::STATUS_FLAGS => STATUS_FLAGS.encode(self.status_flags(), out, offset),
+            attribute::RESOLUTION => RESOLUTION.encode(Single(self.resolution()), out, offset),
+            attribute::APPLICATION_TYPE => {
+                APPLICATION_TYPE.encode(Uint32(self.application_type()), out, offset)
+            }
             _ => return Status::UnsupportedAttribute,
         };
 
@@ -338,5 +389,23 @@ mod tests {
             server.encode_value(AttributeId(0xffff), &mut [], &mut 0),
             Status::UnsupportedAttribute
         );
+    }
+
+    #[test]
+    fn application_type_encodes_as_a_uint32() {
+        let server = AnalogInputServer::new(1.0).with_application_type(APPLICATION_TYPE_COUNT);
+        let mut buf = [0u8; 8];
+        let offset = &mut 0;
+
+        let status =
+            server.encode_value(AttributeId(attribute::APPLICATION_TYPE), &mut buf, offset);
+
+        assert_eq!(status, Status::Success);
+        assert_eq!(buf[0], TypeId::Uint32 as u8);
+        assert_eq!(
+            u32::from_le_bytes(buf[1..5].try_into().expect("slice")),
+            0x000c_0000
+        );
+        assert_eq!(*offset, 5);
     }
 }
