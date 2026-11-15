@@ -217,6 +217,26 @@ where
     }
 }
 
+/// Chains seven handlers, left to right.
+impl<A, B, C, D, E, F, G> ClusterRequestHandler for (A, B, C, D, E, F, G)
+where
+    A: ClusterRequestHandler,
+    B: ClusterRequestHandler,
+    C: ClusterRequestHandler,
+    D: ClusterRequestHandler,
+    E: ClusterRequestHandler,
+    F: ClusterRequestHandler,
+    G: ClusterRequestHandler,
+{
+    fn handle(&self, request: &ClusterRequest<'_>, out: &mut [u8]) -> Option<ClusterReply> {
+        (
+            &self.0,
+            (&self.1, &self.2, &self.3, &self.4, &self.5, &self.6),
+        )
+            .handle(request, out)
+    }
+}
+
 /// A ZDP response, which always travels between the two ZDO endpoints on the
 /// Device Profile (2.4).
 const fn zdp_reply(cluster_id: u16, len: usize) -> ClusterReply {

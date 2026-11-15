@@ -68,6 +68,12 @@ impl<'a> BinaryInputServer<'a> {
     }
 
     #[must_use]
+    pub const fn with_description(mut self, description: &'static str) -> Self {
+        self.description = description;
+        self
+    }
+
+    #[must_use]
     pub const fn with_reporting(mut self, store: &'a dyn AttributeReporting) -> Self {
         self.reporting = Some(store);
         self
