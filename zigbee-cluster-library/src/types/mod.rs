@@ -26,6 +26,7 @@ pub use bitmaps::ZclBitmap48;
 pub use bitmaps::ZclBitmap56;
 pub use bitmaps::ZclBitmap64;
 pub use codec::Bool;
+pub use codec::Single;
 pub use codec::ZclKind;
 pub use collections::Array;
 pub use collections::ArrayOf;

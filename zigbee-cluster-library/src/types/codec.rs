@@ -180,6 +180,26 @@ impl ZclKind for Bool {
     }
 }
 
+/// `single`, an IEEE 754 single-precision float (2.6.2.9).
+///
+/// Every bit pattern except the `Single` non-value is a valid number, so
+/// decoding cannot fail on content — only on running out of bytes.
+pub struct Single(pub f32);
+
+impl ZclKind for Single {
+    type Value<'a> = Self;
+    const TYPE_ID: TypeId = TypeId::SinglePrecision;
+    const ENCODED_SIZE: Option<usize> = Some(4);
+    const ALL_PATTERNS_VALID: bool = true;
+    fn read(bytes: &[u8], offset: &mut usize) -> byte::Result<Self> {
+        Ok(Self(bytes.read_with::<f32>(offset, ctx::LE)?))
+    }
+
+    fn write(value: Self, bytes: &mut [u8], offset: &mut usize) -> byte::Result<()> {
+        bytes.write_with(offset, value.0, ctx::LE)
+    }
+}
+
 /// Reads a fixed-width little-endian integer, the shared body of the numeric
 /// and identifier kinds.
 pub(crate) fn read_le<const N: usize>(bytes: &[u8], offset: &mut usize) -> byte::Result<u64> {
