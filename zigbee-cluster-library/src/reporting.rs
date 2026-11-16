@@ -227,7 +227,11 @@ impl Entry {
             return true;
         };
 
-        let elapsed = now_secs.saturating_sub(reported_at);
+        // wrapping_sub keeps the elapsed time correct across the u32
+        // wraparound (2^32 s); saturating_sub would clamp the "negative"
+        // difference to zero after the clock rolls over and silence the
+        // entry until now_secs reached reported_at again.
+        let elapsed = now_secs.wrapping_sub(reported_at);
         // no further report during the minimum interval, whichever rule below
         // would otherwise fire (2.5.11.2.2, 2.5.11.2.3)
         if elapsed < u32::from(self.config.min_interval) {
@@ -475,6 +479,32 @@ mod table_tests {
             },
         );
         assert!(!table.should_report(CLUSTER, MEASURED_VALUE, 1_000, 9999));
+    }
+
+    // the clock (now_secs) is a u32 that eventually wraps around; the elapsed
+    // time must be measured modularly, not saturated, or the entry would go
+    // silent until now_secs reached reported_at again
+    #[test]
+    fn the_intervals_survive_the_u32_clock_wraparound() {
+        let table = table();
+        table.configure(
+            CLUSTER,
+            MEASURED_VALUE,
+            ReportingConfig {
+                min_interval: 10,
+                max_interval: 60,
+                reportable_change: 100,
+            },
+        );
+        table.reported(CLUSTER, MEASURED_VALUE, u32::MAX - 30, 2300);
+
+        // 31 s later, just past the minimum interval, the clock has wrapped
+        assert!(table.should_report(CLUSTER, MEASURED_VALUE, 1, 2400));
+        // and a moment later, inside the minimum interval, it must not
+        table.reported(CLUSTER, MEASURED_VALUE, 1, 2400);
+        assert!(!table.should_report(CLUSTER, MEASURED_VALUE, 5, 9999));
+        // the maximum interval still fires across the wrap
+        assert!(table.should_report(CLUSTER, MEASURED_VALUE, 61, 2400));
     }
 
     // an attribute nobody configured is left to the application's own policy
