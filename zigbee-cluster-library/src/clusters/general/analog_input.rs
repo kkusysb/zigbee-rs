@@ -166,6 +166,13 @@ pub const APPLICATION_TYPE: Attribute<Uint32, ReadOnly, NotReportable> =
 /// [`APPLICATION_TYPE`] value for a plain counter reading.
 pub const APPLICATION_TYPE_COUNT: u32 = 0x000c_0000;
 
+/// `AnalogInputType::Pressure_Pascal` (ZCL 3.14.11.6), the type byte of an
+/// [`APPLICATION_TYPE`] value for a pressure reading in Pa. Home Assistant
+/// maps it to a pressure sensor whose unit it can display in hPa with
+/// decimals — beyond the whole-hPa granularity of the Pressure Measurement
+/// cluster.
+pub const APPLICATION_TYPE_PRESSURE: u32 = 0x0002_0000;
+
 const ATTRIBUTES: &[AttrInfo] = &[
     DESCRIPTION.attr_info(),
     OUT_OF_SERVICE.attr_info(),
