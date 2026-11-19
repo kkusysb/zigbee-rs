@@ -11,6 +11,8 @@ pub mod basic;
 pub mod power_configuration;
 // 3.5
 pub mod identify;
+// 3.12
+pub mod time;
 // 3.14
 pub mod analog_input;
 // 3.14
