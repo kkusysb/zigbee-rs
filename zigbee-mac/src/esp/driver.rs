@@ -88,6 +88,11 @@ impl<'a> Ieee802154Driver<'a> {
         self.config.short_addr
     }
 
+    /// Radio configuration actually handed to the driver, for diagnostics.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
     pub fn update_driver_config(&mut self, update_fn: impl Fn(&mut Config)) {
         update_fn(&mut self.config);
         self.config.rx_when_idle = true;

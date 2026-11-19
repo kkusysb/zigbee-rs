@@ -130,17 +130,46 @@ impl EspMlmeInner<'_> {
     // retransmits up to aMaxFrameRetries times if unacknowledged (IEEE 802.15.4
     // 7.5.6.4); returns MacError::NoAck if every attempt goes unacknowledged
     async fn transmit_acked(&mut self, frame: &[u8]) -> Result<(), MacError> {
+        // Keep the three failure modes apart. A completed TX with no ACK frame
+        // points at the radio's ACK capture/filtering or at auto-ack being off;
+        // tx-failed means CCA/coex or the 200 ms hardware ACK timeout; a timeout
+        // means one of the radio callbacks was lost. All three currently
+        // collapse into the same NoAck further up the stack.
+        let mut completed_without_ack = 0u8;
+        let mut tx_failed = 0u8;
+        let mut timeouts = 0u8;
         for _ in 0..=A_MAX_FRAME_RETRIES {
             match self.driver.transmit(frame).await {
                 Ok(()) if self.driver.last_tx_acked() => return Ok(()),
-                Ok(()) => {}
+                Ok(()) => completed_without_ack += 1,
                 // no ack / channel busy: retransmit (7.5.6.4)
-                Err(MacError::TxFailed) => {}
+                Err(MacError::TxFailed) => tx_failed += 1,
                 // a lost radio interrupt: retry rather than wedge the caller
-                Err(MacError::TxTimeout) => defmt_or_log::warn!("[MLME] tx-done timeout, retrying"),
+                Err(MacError::TxTimeout) => {
+                    timeouts += 1;
+                    defmt_or_log::warn!("[MLME] tx-done timeout, retrying");
+                }
                 Err(e) => return Err(e),
             }
         }
+        let cfg = self.driver.config();
+        let fcf = u16::from_le_bytes([frame[0], frame[1]]);
+        defmt_or_log::warn!(
+            "[MLME] no ack after {} attempts: no-ack-frame={}, tx-failed={}, timeout={}; frame fcf={:#06x} seq={}; radio ch={}, pan={:?}, short={:?}, auto_ack_tx={}, auto_ack_rx={}, promiscuous={}, cca={} dBm",
+            1 + A_MAX_FRAME_RETRIES,
+            completed_without_ack,
+            tx_failed,
+            timeouts,
+            fcf,
+            frame[2],
+            cfg.channel,
+            cfg.pan_id,
+            cfg.short_addr,
+            cfg.auto_ack_tx,
+            cfg.auto_ack_rx,
+            cfg.promiscuous,
+            cfg.cca_threshold
+        );
         Err(MacError::NoAck)
     }
 
@@ -725,6 +754,16 @@ impl Mlme for EspMlme<'_> {
         // arm RX for the new configuration: otherwise reception stays off
         // until the next transmit triggers rx-on-when-idle
         inner.driver.start_receive();
+        let cfg = inner.driver.config();
+        defmt_or_log::debug!(
+            "[MAC] configured: ch={}, pan={:?}, short={:?}, auto_ack_tx={}, auto_ack_rx={}, promiscuous={}",
+            cfg.channel,
+            cfg.pan_id,
+            cfg.short_addr,
+            cfg.auto_ack_tx,
+            cfg.auto_ack_rx,
+            cfg.promiscuous
+        );
     }
 
     async fn scan_network(
