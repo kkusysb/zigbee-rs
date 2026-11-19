@@ -1090,6 +1090,17 @@ where
             return;
         }
 
+        // name the sender: an end device is only removed by its parent, so
+        // this line says whether the coordinator (or a router acting as the
+        // parent) asked the device to leave
+        defmt_or_log::info!(
+            "[NWK] leave request from {:#06x} (ieee={:?}, parent={}), rejoin={}",
+            header.source.0,
+            header.source_ieee,
+            from_parent,
+            options.rejoin()
+        );
+
         if let Err(e) = self
             .leave_network(options.remove_children(), options.rejoin())
             .await
