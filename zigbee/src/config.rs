@@ -70,31 +70,38 @@ pub struct RejoinConfig {
     /// Rejoin attempts, the first one included. `None` never gives the
     /// network up.
     ///
-    /// A finite count ends in steering, which is also what finds a network
-    /// that moved to another channel (BDB 7.1 step 4 scans none).
+    /// A finite count ends in [`crate::Commissioned::Failed`] unless
+    /// [`Self::steer_after_failure`] opts into network steering (BDB 7.1 step
+    /// 4 scans none).
     pub attempts: Option<u8>,
     /// Delay before the second attempt, doubling for each further one.
     pub backoff_ms: u32,
     /// Cap on that delay.
     pub max_backoff_ms: u32,
-    /// Whether using up the attempts commissions the device again with
-    /// network steering, which needs the network opened for joining.
+    /// Whether using up the attempts forgets the network and commissions the
+    /// device again with network steering, which needs the network opened for
+    /// joining.
     ///
-    /// With `false` the device keeps what it needs to rejoin and reports
-    /// [`crate::Commissioned::Failed`] instead. A device on no network steers
-    /// either way.
+    /// Off by default: a rejoin that fails because the coordinator is merely
+    /// unreachable must not erase the address and keys the next boot needs.
+    /// Only a deliberate action (a button, a commissioning command) should
+    /// forget a network. With this off the device keeps what it needs to
+    /// rejoin and reports [`crate::Commissioned::Failed`] instead, so the
+    /// application can decide to sleep, reset or re-commission. A device on no
+    /// network steers either way.
     pub steer_after_failure: bool,
 }
 
 impl Default for RejoinConfig {
-    /// Five attempts over roughly two minutes, then steering: long enough for
-    /// a coordinator to reboot, short enough to re-commission by itself.
+    /// Five attempts over roughly two minutes, long enough for a coordinator
+    /// to reboot. The remembered network is kept: steering after a failure has
+    /// to be asked for explicitly.
     fn default() -> Self {
         Self {
             attempts: Some(5),
             backoff_ms: 10_000,
             max_backoff_ms: 60_000,
-            steer_after_failure: true,
+            steer_after_failure: false,
         }
     }
 }

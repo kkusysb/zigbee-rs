@@ -27,15 +27,19 @@ A device that was on a network rejoins it at startup, keeping its keys (BDB
 7.1). That rejoin fails for reasons that pass by themselves — after a power
 cut this device may be up well before the router it rejoins through — so it is
 retried on the schedule in `RejoinConfig`: five attempts over about two
-minutes by default. Only when the attempts are used up, or the parent denies
-access because this device is no longer a member, is the remembered network
-forgotten and network steering run, which needs the network opened for joining
-again.
+minutes by default. When the attempts are used up (or the parent denies access
+because this device is no longer a member) the stack stops and reports
+`Commissioned::Failed`; the remembered network — address, keys, frame counters,
+Trust Center link keys — is kept, so the next boot can retry the rejoin. Only
+an explicit action forgets a network, e.g. the application's own
+`forget_network()` call on a reset button.
 
-Set `attempts: None` for a mains-powered device that should never give its
-network up, or `steer_after_failure: false` to be told the rejoin failed
-(`Commissioned::Failed`) while the keys are kept, and decide in the
-application whether to sleep, reset or re-commission:
+If a failed rejoin should instead re-commission the device from scratch, set
+`steer_after_failure: true`. That forgets the network and runs network
+steering, which needs the network opened for joining again — and it means an
+unreachable coordinator can erase a device that would otherwise recover on its
+own. Set `attempts: None` for a mains-powered device that should never give
+its network up:
 
 ```rust,ignore
 let config = StackConfig::new(network, device, timing, descriptors)

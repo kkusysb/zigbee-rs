@@ -305,8 +305,11 @@ where
     ///
     /// Runs the BDB initialization procedure first (7.1): a device that is
     /// still on a network rejoins it, keeping its keys, and retries as
-    /// [`RejoinConfig`] asks (7.1 step 5). Network steering commissions the
-    /// device from scratch (BDB 8.2) only once that is given up.
+    /// [`RejoinConfig`] asks (7.1 step 5). When the attempts are used up the
+    /// device keeps the network and reports [`Commissioned::Failed`], unless
+    /// [`RejoinConfig::steer_after_failure`] opted into forgetting it and
+    /// commissioning from scratch with network steering (BDB 8.2). A device
+    /// that is on no network steers regardless.
     ///
     /// A remembered network whose extended PAN id is not the configured one is
     /// forgotten before the rejoin, so changing the configured network takes
@@ -681,6 +684,12 @@ mod tests {
         let config = RejoinConfig::default();
         let total: u32 = Backoff::new(&config).sum();
         assert!(total >= 120_000, "{total} ms is too short for a reboot");
-        assert!(config.steer_after_failure);
+    }
+
+    // a failed rejoin must not erase the network on its own: only an explicit
+    // action (or opting into steering) may forget it
+    #[test]
+    fn the_default_keeps_the_network_on_a_failed_rejoin() {
+        assert!(!RejoinConfig::default().steer_after_failure);
     }
 }
