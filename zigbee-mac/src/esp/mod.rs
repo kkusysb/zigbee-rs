@@ -138,12 +138,17 @@ impl EspMlmeInner<'_> {
         let mut completed_without_ack = 0u8;
         let mut tx_failed = 0u8;
         let mut timeouts = 0u8;
-        for _ in 0..=A_MAX_FRAME_RETRIES {
+        let mut abort_reasons = [0u8; 4];
+        let cca_busy_before = self.driver.cca_busy_count();
+        for attempt in 0..=A_MAX_FRAME_RETRIES as usize {
             match self.driver.transmit(frame).await {
                 Ok(()) if self.driver.last_tx_acked() => return Ok(()),
                 Ok(()) => completed_without_ack += 1,
                 // no ack / channel busy: retransmit (7.5.6.4)
-                Err(MacError::TxFailed) => tx_failed += 1,
+                Err(MacError::TxFailed) => {
+                    tx_failed += 1;
+                    abort_reasons[attempt] = self.driver.last_tx_abort_reason();
+                }
                 // a lost radio interrupt: retry rather than wedge the caller
                 Err(MacError::TxTimeout) => {
                     timeouts += 1;
@@ -154,12 +159,15 @@ impl EspMlmeInner<'_> {
         }
         let cfg = self.driver.config();
         let fcf = u16::from_le_bytes([frame[0], frame[1]]);
+        let cca_busy_delta = self.driver.cca_busy_count().wrapping_sub(cca_busy_before);
         defmt_or_log::warn!(
-            "[MLME] no ack after {} attempts: no-ack-frame={}, tx-failed={}, timeout={}; frame fcf={:#06x} seq={}; radio ch={}, pan={:?}, short={:?}, auto_ack_tx={}, auto_ack_rx={}, promiscuous={}, cca={} dBm",
+            "[MLME] no ack after {} attempts: no-ack-frame={}, tx-failed={}, timeout={}, abort={:?}, cca-busy-delta={}; frame fcf={:#06x} seq={}; radio ch={}, pan={:?}, short={:?}, auto_ack_tx={}, auto_ack_rx={}, promiscuous={}, cca={} dBm",
             1 + A_MAX_FRAME_RETRIES,
             completed_without_ack,
             tx_failed,
             timeouts,
+            abort_reasons,
+            cca_busy_delta,
             fcf,
             frame[2],
             cfg.channel,

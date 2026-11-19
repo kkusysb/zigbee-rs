@@ -4,6 +4,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 use esp_hal::efuse;
+use esp_hal::peripherals::IEEE802154;
 use esp_radio::ieee802154::Config;
 use esp_radio::ieee802154::Error as Ieee802154Error;
 use esp_radio::ieee802154::Ieee802154;
@@ -91,6 +92,28 @@ impl<'a> Ieee802154Driver<'a> {
     /// Radio configuration actually handed to the driver, for diagnostics.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Raw IEEE 802.15.4 TX abort reason left in `TX_STATUS` by the radio ISR.
+    /// esp-radio collapses all aborts into one `tx_failed` callback, so this is
+    /// the only way to tell CCA/coex/missing-ACK apart from the application.
+    /// Values follow esp-radio's `TxAbortReason`: 2..=9 RxAck errors,
+    /// 16 RxAckTimeout, 18 TxCoexBreak, 24 CcaFailed, 25 CcaBusy.
+    pub fn last_tx_abort_reason(&self) -> u8 {
+        IEEE802154::regs()
+            .tx_status()
+            .read()
+            .tx_abort_status()
+            .bits()
+    }
+
+    /// Hardware counter of CCA-busy events (monotonic since radio init).
+    pub fn cca_busy_count(&self) -> u16 {
+        IEEE802154::regs()
+            .cca_busy_cnt()
+            .read()
+            .cca_busy_cnt()
+            .bits()
     }
 
     pub fn update_driver_config(&mut self, update_fn: impl Fn(&mut Config)) {
