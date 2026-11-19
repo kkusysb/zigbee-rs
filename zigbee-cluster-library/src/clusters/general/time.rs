@@ -4,7 +4,8 @@
 //!
 //! A Time server keeps a real-time clock; [`TimeClient`] reads the mandatory
 //! `Time` (`0x0000`) and `TimeStatus` (`0x0001`) attributes, plus the optional
-//! `TimeZone` (`0x0002`), from another device and caches the last response.
+//! `TimeZone` (`0x0002`) and `LocalTime` (`0x0007`), from another device and
+//! caches the last response.
 //!
 //! The client is a [`ClusterRequestHandler`]: put it in the handler chain as a
 //! shared reference so it sees the `Read Attributes Response` the stack
@@ -176,6 +177,12 @@ pub const TIME_STATUS: Attribute<Bitmap8<TimeStatus>> =
 /// `TimeZone` (`int32`), optional and read/write (ZCL 3.12.2.2.3).
 pub const TIME_ZONE: Attribute<Int32> = CLUSTER.attribute(AttributeId(0x0002), "TimeZone");
 
+/// `LocalTime` (`UTCTime`), optional and read-only (ZCL 3.12.2.2.4).
+///
+/// This is the server's local wall-clock time with daylight saving applied,
+/// encoded like `Time` but not expressed in UTC.
+pub const LOCAL_TIME: Attribute<UtcTime> = CLUSTER.attribute(AttributeId(0x0007), "LocalTime");
+
 /// Bare attribute identifiers, for matching against a received record.
 pub mod attribute {
     /// `Time` (`UTCTime`).
@@ -184,13 +191,16 @@ pub mod attribute {
     pub const TIME_STATUS: u16 = super::TIME_STATUS.id().0;
     /// `TimeZone` (`int32`, seconds east of UTC).
     pub const TIME_ZONE: u16 = super::TIME_ZONE.id().0;
+    /// `LocalTime` (`UTCTime`, local wall clock).
+    pub const LOCAL_TIME: u16 = super::LOCAL_TIME.id().0;
 }
 
 /// Attributes [`TimeClient::read`] asks for, in request order.
-const READ_ATTRIBUTES: [u16; 3] = [
+const READ_ATTRIBUTES: [u16; 4] = [
     attribute::TIME,
     attribute::TIME_STATUS,
     attribute::TIME_ZONE,
+    attribute::LOCAL_TIME,
 ];
 
 /// Errors produced while sending a Time cluster read.
@@ -229,6 +239,7 @@ pub struct TimeClient {
     time: AtomicU32,
     time_status: AtomicU8,
     time_zone: AtomicI32,
+    local_time: AtomicU32,
     sequence: AtomicU8,
     pending_sequence: AtomicU8,
     pending: AtomicBool,
@@ -240,10 +251,11 @@ impl defmt::Format for TimeClient {
     fn format(&self, f: defmt::Formatter<'_>) {
         defmt::write!(
             f,
-            "TimeClient {{ time: {}, status: {}, zone: {} }}",
+            "TimeClient {{ time: {}, status: {}, zone: {}, local: {} }}",
             self.time().0,
             self.time_status().raw(),
-            self.time_zone().unwrap_or(i32::MIN)
+            self.time_zone().unwrap_or(i32::MIN),
+            self.local_time().0
         );
     }
 }
@@ -255,6 +267,7 @@ impl TimeClient {
             time: AtomicU32::new(UtcTime::INVALID.0),
             time_status: AtomicU8::new(0),
             time_zone: AtomicI32::new(i32::MIN),
+            local_time: AtomicU32::new(UtcTime::INVALID.0),
             sequence: AtomicU8::new(0),
             pending_sequence: AtomicU8::new(0),
             pending: AtomicBool::new(false),
@@ -279,9 +292,24 @@ impl TimeClient {
         (zone != i32::MIN).then_some(zone)
     }
 
+    /// Last `LocalTime` value, [`UtcTime::INVALID`] until a response arrives.
+    ///
+    /// This is local wall-clock time with daylight saving applied, encoded in
+    /// the same seconds-since-2000 form as [`time`](Self::time); it is not
+    /// UTC, so [`UtcTime::unix_seconds`] gives a Unix timestamp of the local
+    /// wall clock rather than of the actual instant.
+    pub fn local_time(&self) -> UtcTime {
+        UtcTime(self.local_time.load(Ordering::Relaxed))
+    }
+
     /// Whether a valid `Time` value has been received.
     pub fn has_time(&self) -> bool {
         self.time().is_valid()
+    }
+
+    /// Whether a valid `LocalTime` value has been received.
+    pub fn has_local_time(&self) -> bool {
+        self.local_time().is_valid()
     }
 
     /// Whether a request is waiting for its response.
@@ -401,6 +429,12 @@ impl ClusterRequestHandler for TimeClient {
                         ) if value != i32::MIN => {
                             self.time_zone.store(value, Ordering::Relaxed);
                         }
+                        (
+                            attribute::LOCAL_TIME,
+                            Some(ZclDataType::Time(TimeType::UTCTime(value))),
+                        ) => {
+                            self.local_time.store(value, Ordering::Relaxed);
+                        }
                         _ => {}
                     }
                 }
@@ -471,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn read_request_asks_for_time_status_and_zone() {
+    fn read_request_asks_for_time_status_zone_and_local_time() {
         let mut buf = [0u8; MAX_REQUEST_LEN];
         let asdu = encode_read_request(&mut buf, 0x2a, &READ_ATTRIBUTES).expect("encode");
         let (frame, used) = ZclFrame::try_read(asdu, ()).expect("parse");
@@ -488,10 +522,11 @@ mod tests {
         else {
             panic!("expected ReadAttributes");
         };
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 4);
         assert_eq!(records[0].attribute_id, attribute::TIME);
         assert_eq!(records[1].attribute_id, attribute::TIME_STATUS);
         assert_eq!(records[2].attribute_id, attribute::TIME_ZONE);
+        assert_eq!(records[3].attribute_id, attribute::LOCAL_TIME);
     }
 
     #[test]
@@ -500,12 +535,13 @@ mod tests {
         client.pending_sequence.store(7, Ordering::Relaxed);
         client.pending.store(true, Ordering::Release);
 
-        // Read Attributes Response: Time, TimeStatus and TimeZone.
+        // Read Attributes Response: Time, TimeStatus, TimeZone and LocalTime.
         let asdu = [
             0x18, 0x07, 0x01, // frame control, seq, ReadAttributesResponse
             0x00, 0x00, 0x00, 0xe2, 0x10, 0x20, 0x30, 0x40, // Time = 0x40302010
             0x01, 0x00, 0x00, 0x18, 0x03, // TimeStatus = Master | Synchronized
             0x02, 0x00, 0x00, 0x2b, 0x10, 0x0e, 0x00, 0x00, // TimeZone = 3600 s
+            0x07, 0x00, 0x00, 0xe2, 0x20, 0x2e, 0x30, 0x40, // LocalTime = 0x40302e20
         ];
         let mut out = [0u8; 8];
 
@@ -515,6 +551,8 @@ mod tests {
         assert!(client.time_status().is_master());
         assert!(client.time_status().is_synchronized());
         assert_eq!(client.time_zone(), Some(3600));
+        assert_eq!(client.local_time().0, 0x4030_2e20);
+        assert!(client.has_local_time());
         assert!(!client.is_pending());
         assert_eq!(client.last_status(), Some(Status::Success));
     }
