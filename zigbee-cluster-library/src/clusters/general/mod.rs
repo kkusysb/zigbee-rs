@@ -11,6 +11,8 @@ pub mod basic;
 pub mod power_configuration;
 // 3.5
 pub mod identify;
+// 3.8
+pub mod on_off;
 // 3.12
 pub mod time;
 // 3.14
